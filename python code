@@ -5,6 +5,11 @@
 # This simulation explores how different weightings of three mechanisms
 # affect predicted IOP thresholds and glaucoma classification.
 # The weights are arbitrary - the value lies in showing sensitivity.
+# 
+# IMPORTANT: All findings are internal to the model. The model generates
+# its own disease labels. Without external validation against clinical
+# outcomes, these findings should not be interpreted as evidence for or
+# against clinical practice.
 # =============================================================================
 
 import numpy as np
@@ -289,6 +294,11 @@ This sensitivity to assumptions is the key finding:
 
 This suggests that any conclusion based on a single weight configuration
 would be fragile. Validation against clinical data is essential.
+
+IMPORTANT: These findings are internal to the model. The model generates
+its own disease labels. Without external validation against clinical
+outcomes, these results should not be interpreted as evidence for or
+against clinical practice.
 """)
 
 # =============================================================================
@@ -309,7 +319,7 @@ for i, r in enumerate(results):
     ax1.axvline(x=r['mean_threshold'], color=colors[i], linestyle='--', alpha=0.5, 
                 linewidth=1.5, label=f'Config {r["config"]}: {r["mean_threshold"]:.1f} mmHg')
 
-ax1.axvline(x=21, color='black', linestyle='-', linewidth=2.5, label='Traditional 21 mmHg')
+ax1.axvline(x=21, color='black', linestyle='-', linewidth=2.5, label='Traditional 21 mmHg (reference)')
 ax1.set_xlabel('IOP Threshold (mmHg)')
 ax1.set_ylabel('Density')
 ax1.set_title('Distribution of Individual Theory Thresholds\n(Integrated thresholds vary by configuration)')
@@ -370,11 +380,12 @@ plt.savefig('figure3_sensitivity_to_weights.png', dpi=300, bbox_inches='tight', 
 plt.show()
 print("  Saved: figure3_sensitivity_to_weights.png")
 
-# Figure 4: Scatter plot of vulnerability vs threshold (using Config 1 as example)
+# Figure 4: Scatter plot of vulnerability vs threshold
+# Example using Configuration 4 weights (0.40, 0.35, 0.25)
 fig4, ax4 = plt.subplots(figsize=(10, 8))
 sample_idx = np.random.choice(n_eyes, size=10000, replace=False)
 
-# Use the first configuration as an example
+# Example using Configuration 4 weights (0.40, 0.35, 0.25)
 combined_vulnerability = (0.4 * mech_vulnerability + 
                           0.35 * vascular_vulnerability + 
                           0.25 * glymphatic_vulnerability)[sample_idx]
@@ -385,10 +396,10 @@ example_threshold = (0.4 * mech_threshold +
 
 scatter = ax4.scatter(combined_vulnerability, example_threshold,
                      c=age[sample_idx], cmap='viridis', alpha=0.6, s=15, edgecolor='none')
-ax4.axhline(y=21, color='red', linestyle='--', linewidth=2.5, label='Traditional 21 mmHg')
+ax4.axhline(y=21, color='red', linestyle='--', linewidth=2.5, label='Traditional 21 mmHg (reference)')
 ax4.set_xlabel('Combined Vulnerability Score (0=Resistant, 1=Susceptible)')
 ax4.set_ylabel('Integrated IOP Threshold (mmHg)')
-ax4.set_title('Vulnerability vs. Integrated Threshold (Color = Age)\n(Example using Config 4 weights)')
+ax4.set_title('Vulnerability vs. Integrated Threshold (Color = Age)\n(Example using Configuration 4 weights: 0.40, 0.35, 0.25)')
 cbar = plt.colorbar(scatter, ax=ax4)
 cbar.set_label('Age (years)', rotation=270, labelpad=25)
 ax4.legend(loc='upper right')
@@ -422,7 +433,7 @@ for patch, color in zip(bp['boxes'], colors):
     patch.set_facecolor(color)
     patch.set_alpha(0.6)
 
-ax5.axhline(y=21, color='black', linestyle='-', linewidth=2.5, label='Traditional 21 mmHg')
+ax5.axhline(y=21, color='black', linestyle='-', linewidth=2.5, label='Traditional 21 mmHg (reference)')
 ax5.set_xlabel('Weight Configuration')
 ax5.set_ylabel('Integrated IOP Threshold (mmHg)')
 ax5.set_title('Distribution of Integrated Thresholds Across Arbitrary Weight Configurations')
@@ -436,7 +447,7 @@ print("  Saved: figure5_threshold_variation.png")
 print("\nAll 5 figures saved at 300 DPI!")
 
 # =============================================================================
-# 11. CONCLUSION
+# 11. CONCLUSION - REVISED WITH CAREFUL WORDING
 # =============================================================================
 print("\n" + "="*70)
 print("CONCLUSION")
@@ -445,26 +456,27 @@ print("="*70)
 print(f"""
 This integrated Monte Carlo simulation demonstrates the following:
 
-1. INDIVIDUAL THRESHOLDS VARY WIDELY
+1. INDIVIDUAL THRESHOLDS VARY WIDELY (UNDER MODEL ASSUMPTIONS)
    - Mechanical threshold: {mech_threshold.mean():.2f} +/- {mech_threshold.std():.2f} mmHg
    - Vascular threshold: {vascular_threshold_val.mean():.2f} +/- {vascular_threshold_val.std():.2f} mmHg
    - Glymphatic threshold: {glymphatic_threshold_val.mean():.2f} +/- {glymphatic_threshold_val.std():.2f} mmHg
 
-2. THE WEIGHTS ARE ARBITRARY
+2. THE WEIGHTS ARE ARBITRARY - RESULTS ARE SENSITIVE
    - No single configuration is correct
-   - Mean integrated threshold varies from {threshold_min:.2f} to {threshold_max:.2f} mmHg
+   - Mean integrated threshold varies from {threshold_min:.2f} to {threshold_max:.2f} mmHg across configurations
    - Glaucoma prevalence varies from {glaucoma_min:.2f}% to {glaucoma_max:.2f}%
    - NTG prevalence varies from {ntg_min:.2f}% to {ntg_max:.2f}%
 
 3. THIS SENSITIVITY IS THE KEY FINDING
-   - Results depend heavily on assumptions
-   - Validation against clinical data is essential
+   - Results depend heavily on arbitrary assumptions
    - Any single result would be fragile
+   - Validation against clinical data is essential
 
-4. THE 21 mmHg CUT-OFF IS ARBITRARY
-   - Traditional threshold is not supported by model
-   - Even under the most favorable configuration, the model suggests 
-     considering lower thresholds for some patients
+4. THE MODEL DIFFERS FROM THE TRADITIONAL 21 mmHg CUT-OFF
+   - Under model assumptions, mean thresholds range from {threshold_min:.2f} to {threshold_max:.2f} mmHg
+   - This differs from the traditional 21 mmHg clinical threshold
+   - However, these findings are internal to the model and should NOT be 
+     interpreted as evidence against the clinical threshold
 
 5. INTEGRATED MODELING IS FEASIBLE
    - This proof-of-concept demonstrates the approach
@@ -474,6 +486,13 @@ KEY INSIGHT:
   The weights are arbitrary. The value of this exercise is demonstrating 
   that results vary substantially across plausible configurations. 
   This sensitivity to assumptions is the key finding, not any single number.
+
+IMPORTANT CAVEAT:
+  All findings are internal to the model. The model generates its own
+  disease labels. Without external validation against clinical outcomes,
+  these results should not be interpreted as evidence for or against
+  clinical practice. The 21 mmHg threshold has clinical utility that
+  this model does not address.
 """)
 
 print("="*70)
