@@ -1,11 +1,11 @@
 # =============================================================================
 # MONTE CARLO SIMULATION: INTEGRATED MECHANICAL, VASCULAR, AND GLYMPHATIC
 # THEORIES OF GLAUCOMATOUS DAMAGE
-# =============================================================================
+#
 # This simulation explores how different weightings of three mechanisms
 # affect predicted IOP thresholds and glaucoma classification.
-# The weights are arbitrary - the value lies in showing sensitivity.
-# 
+# The weights are arbitrary; the value lies in showing sensitivity.
+#
 # IMPORTANT: All findings are internal to the model. The model generates
 # its own disease labels. Without external validation against clinical
 # outcomes, these findings should not be interpreted as evidence for or
@@ -18,6 +18,8 @@ import matplotlib.pyplot as plt
 import warnings
 warnings.filterwarnings('ignore')
 
+from scipy.stats import spearmanr
+
 # Set publication quality style
 try:
     plt.style.use('seaborn-v0_8-whitegrid')
@@ -27,13 +29,12 @@ except:
     except:
         pass
 
-# Configure fonts
 plt.rcParams['font.family'] = 'sans-serif'
 plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Liberation Sans', 'Bitstream Vera Sans']
 plt.rcParams['font.size'] = 11
 plt.rcParams['axes.titlesize'] = 13
 plt.rcParams['axes.labelsize'] = 11
-plt.rcParams['legend.fontsize'] = 10
+plt.rcParams['legend.fontsize'] = 9
 plt.rcParams['figure.dpi'] = 100
 plt.rcParams['savefig.dpi'] = 300
 plt.rcParams['savefig.bbox'] = 'tight'
@@ -41,30 +42,37 @@ plt.rcParams['figure.figsize'] = (10, 8)
 
 np.random.seed(2026)
 
+# Physiological floor and ceiling for component thresholds
+THRESHOLD_FLOOR = 5.0
+THRESHOLD_CEILING = 40.0
+
 # =============================================================================
 # 1. POPULATION PARAMETERS
 # =============================================================================
-n_eyes = 1_000_000
+n_eyes = 100_000
 print(f"Generating {n_eyes:,} virtual eyes...")
 
-# Demographics
 age = np.random.normal(loc=62, scale=14, size=n_eyes)
 age = np.clip(age, 18, 95)
 
-# Ocular parameters
 cct = np.random.normal(loc=550, scale=35, size=n_eyes)
 cct = np.clip(cct, 450, 650)
 
 corneal_hysteresis = np.random.normal(loc=10.5, scale=1.8, size=n_eyes)
 corneal_hysteresis = np.clip(corneal_hysteresis, 6, 16)
 
-scleral_stiffness = 0.5 + (age / 100) + (1 / (cct / 100))
+scleral_stiffness = (
+    1.5
+    + 0.006 * (age - 62)
+    + 0.004 * (550 - cct)
+    + np.random.normal(0, 0.12, n_eyes)
+)
 scleral_stiffness = np.clip(scleral_stiffness, 0.8, 2.5)
 
 lc_pore_diam = np.random.normal(loc=40, scale=10, size=n_eyes)
 lc_pore_diam = np.clip(lc_pore_diam, 15, 80)
 
-baseline_iop = np.random.normal(loc=16.5, scale=3.0, size=n_eyes)
+baseline_iop = np.random.normal(loc=16.5, scale=3.5, size=n_eyes)
 baseline_iop = np.clip(baseline_iop, 8, 35)
 
 map_pressure = np.random.normal(loc=95, scale=12, size=n_eyes)
@@ -80,23 +88,27 @@ print("Calculating mechanical vulnerability...")
 
 mech_vulnerability = np.random.beta(a=1.5, b=4, size=n_eyes)
 
-thin_lamina = np.random.binomial(1, 0.08, size=n_eyes)
-mech_vulnerability = mech_vulnerability + 0.4 * thin_lamina
+thin_lc = np.random.binomial(1, 0.08, size=n_eyes)
+mech_vulnerability += 0.4 * thin_lc
 
 family_history = np.random.binomial(1, 0.10, size=n_eyes)
-mech_vulnerability = mech_vulnerability + 0.25 * family_history
+mech_vulnerability += 0.25 * family_history
+
 mech_vulnerability = np.clip(mech_vulnerability, 0, 1)
 
-def mechanical_threshold(age, scleral_stiffness, lc_pore_diam, csfp, mech_vulnerability):
-    base = 24.0
-    age_effect = -0.10 * (age - 60)
-    stiffness_effect = 2.0 * (scleral_stiffness - 1.5)
-    pore_effect = -6.0 * (lc_pore_diam - 40) / 40
-    csfp_effect = 0.3 * (csfp - 12)
-    vulnerability_effect = -12.0 * mech_vulnerability
-    threshold = base + age_effect + stiffness_effect + pore_effect + csfp_effect + vulnerability_effect
-    threshold = threshold + np.random.normal(0, 1.5, size=n_eyes)
-    return np.clip(threshold, 8, 40)
+ch_effect = -0.15 * (corneal_hysteresis - 10.5)
+
+mech_threshold = (
+    24.0
+    - 0.10 * (age - 60)
+    + 2.0 * (scleral_stiffness - 1.5)
+    - 6.0 * (lc_pore_diam - 40) / 40
+    + 0.3 * (csfp - 12)
+    - 12.0 * mech_vulnerability
+    + ch_effect
+    + np.random.normal(0, 1.5, n_eyes)
+)
+mech_threshold = np.clip(mech_threshold, THRESHOLD_FLOOR, THRESHOLD_CEILING)
 
 # =============================================================================
 # 3. VASCULAR VULNERABILITY
@@ -105,29 +117,42 @@ print("Calculating vascular vulnerability...")
 
 vascular_vulnerability = np.random.beta(a=2, b=5, size=n_eyes)
 
+nocturnal_dip_fraction = np.random.normal(loc=0.10, scale=0.07, size=n_eyes)
+nocturnal_dip_fraction = np.clip(nocturnal_dip_fraction, 0.0, 0.40)
+nocturnal_dip_mmhg = nocturnal_dip_fraction * map_pressure
+nocturnal_hypotension = (nocturnal_dip_mmhg > 20).astype(int)
+vascular_vulnerability += 0.2 * nocturnal_hypotension
+
 sleep_apnea = np.random.binomial(1, 0.03, size=n_eyes)
-vascular_vulnerability = vascular_vulnerability + 0.5 * sleep_apnea
+vascular_vulnerability += 0.5 * sleep_apnea
 
 diabetes = np.random.binomial(1, 0.08, size=n_eyes)
-vascular_vulnerability = vascular_vulnerability + 0.3 * diabetes
+vascular_vulnerability += 0.3 * diabetes
 
 hypertension = np.random.binomial(1, 0.15, size=n_eyes)
-vascular_vulnerability = vascular_vulnerability + 0.2 * hypertension
+vascular_vulnerability += 0.2 * hypertension
 
-nocturnal_hypotension = np.random.normal(loc=15, scale=5, size=n_eyes)
-vascular_vulnerability = vascular_vulnerability + 0.2 * (nocturnal_hypotension > 20)
 vascular_vulnerability = np.clip(vascular_vulnerability, 0, 1)
 
-def vascular_threshold(map_pressure, baseline_iop, age, vascular_vulnerability):
-    base = 24.0
-    opp = map_pressure - baseline_iop
-    autoregulation_failure = np.where(age > 65, 0.3, 0.1)
-    perfusion_effect = -8.0 * (1 - np.clip(opp / 50, 0, 1))
-    autoreg_effect = -4.0 * autoregulation_failure
-    vulnerability_effect = -10.0 * vascular_vulnerability
-    threshold = base + perfusion_effect + autoreg_effect + vulnerability_effect
-    threshold = threshold + np.random.normal(0, 1.5, size=n_eyes)
-    return np.clip(threshold, 8, 40)
+iop_measurement_noise = np.random.normal(0, 2.0, size=n_eyes)
+measured_iop = np.clip(baseline_iop + iop_measurement_noise, 5, 40)
+
+# Conventional estimate of mean ocular perfusion pressure
+opp = (2.0 / 3.0) * map_pressure - measured_iop
+
+perfusion_effect = -8.0 * np.clip(1.0 - opp / 50.0, 0.0, 1.0)
+
+autoreg_coeff = np.where(age > 65, 0.3, 0.1)
+autoreg_effect = -4.0 * autoreg_coeff
+
+vascular_threshold = (
+    24.0
+    + perfusion_effect
+    + autoreg_effect
+    - 10.0 * vascular_vulnerability
+    + np.random.normal(0, 1.5, n_eyes)
+)
+vascular_threshold = np.clip(vascular_threshold, THRESHOLD_FLOOR, THRESHOLD_CEILING)
 
 # =============================================================================
 # 4. GLYMPHATIC VULNERABILITY
@@ -137,44 +162,28 @@ print("Calculating glymphatic vulnerability...")
 glymphatic_vulnerability = np.random.beta(a=1.5, b=3, size=n_eyes)
 
 glymphatic_variant = np.random.binomial(1, 0.15, size=n_eyes)
-glymphatic_vulnerability = glymphatic_vulnerability + 0.3 * glymphatic_variant
+glymphatic_vulnerability += 0.3 * glymphatic_variant
 
-sleep_disturbance = np.random.beta(a=1.5 + 0.5 * sleep_apnea, b=5, size=n_eyes)
-glymphatic_vulnerability = glymphatic_vulnerability + 0.3 * sleep_disturbance
+sleep_disturbance = 0.5 * sleep_apnea + 0.01 * np.clip(age - 60, 0, None)
+glymphatic_vulnerability += 0.3 * sleep_disturbance
 
-glymphatic_vulnerability = glymphatic_vulnerability + 0.2 * (1 - np.clip(csfp / 15, 0, 1))
+glymphatic_vulnerability += 0.05 * np.clip(12 - csfp, 0, None)
+
 glymphatic_vulnerability = np.clip(glymphatic_vulnerability, 0, 1)
 
-def glymphatic_threshold(age, csfp, glymphatic_vulnerability):
-    base = 24.0
-    age_effect = -0.10 * (age - 60)
-    csfp_effect = 0.5 * (csfp - 12)
-    vulnerability_effect = -12.0 * glymphatic_vulnerability
-    threshold = base + age_effect + csfp_effect + vulnerability_effect
-    threshold = threshold + np.random.normal(0, 1.5, size=n_eyes)
-    return np.clip(threshold, 8, 40)
+glymphatic_threshold = (
+    24.0
+    - 0.10 * (age - 60)
+    + 0.5 * (csfp - 12)
+    - 12.0 * glymphatic_vulnerability
+    + np.random.normal(0, 1.5, n_eyes)
+)
+glymphatic_threshold = np.clip(glymphatic_threshold, THRESHOLD_FLOOR, THRESHOLD_CEILING)
 
 # =============================================================================
-# 5. CALCULATE THRESHOLDS
+# 5. INTEGRATED THRESHOLDS AND WEIGHT CONFIGURATIONS
 # =============================================================================
 print("Calculating thresholds...")
-
-mech_threshold = mechanical_threshold(age, scleral_stiffness, lc_pore_diam, csfp, mech_vulnerability)
-vascular_threshold_val = vascular_threshold(map_pressure, baseline_iop, age, vascular_vulnerability)
-glymphatic_threshold_val = glymphatic_threshold(age, csfp, glymphatic_vulnerability)
-
-# =============================================================================
-# 6. ADD MEASUREMENT NOISE
-# =============================================================================
-noise = np.random.normal(0, 2.0, size=n_eyes)
-measured_iop = baseline_iop + noise
-measured_iop = np.clip(measured_iop, 5, 40)
-
-# =============================================================================
-# 7. WEIGHT CONFIGURATIONS (ALL EXPLORED EQUALLY)
-# =============================================================================
-# No single configuration is privileged. All are presented equally.
-# The weights are arbitrary. The value is in showing sensitivity.
 
 weight_configs = [
     {'mechanical': 0.50, 'vascular': 0.30, 'glymphatic': 0.20},
@@ -184,158 +193,301 @@ weight_configs = [
     {'mechanical': 0.33, 'vascular': 0.33, 'glymphatic': 0.34},
 ]
 
-# =============================================================================
-# 8. OUTPUT
-# =============================================================================
-print("\n" + "="*70)
-print("INTEGRATED GLAUCOMA MODEL: 1,000,000 VIRTUAL EYES")
-print("="*70)
+def integrated_threshold_additive(w, mech, vasc, glym):
+    return w['mechanical'] * mech + w['vascular'] * vasc + w['glymphatic'] * glym
 
-print("\nPopulation Parameters (Mean +/- SD):")
-print(f"  Age: {age.mean():.2f} +/- {age.std():.2f} years")
-print(f"  CCT: {cct.mean():.2f} +/- {cct.std():.2f} um")
-print(f"  Corneal Hysteresis: {corneal_hysteresis.mean():.2f} +/- {corneal_hysteresis.std():.2f} mmHg")
-print(f"  Scleral Stiffness: {scleral_stiffness.mean():.3f} +/- {scleral_stiffness.std():.3f}")
-print(f"  LC Pore Diameter: {lc_pore_diam.mean():.2f} +/- {lc_pore_diam.std():.2f} um")
-print(f"  Baseline IOP: {baseline_iop.mean():.2f} +/- {baseline_iop.std():.2f} mmHg")
-print(f"  Measured IOP: {measured_iop.mean():.2f} +/- {measured_iop.std():.2f} mmHg")
-print(f"  MAP: {map_pressure.mean():.2f} +/- {map_pressure.std():.2f} mmHg")
-print(f"  CSFP: {csfp.mean():.2f} +/- {csfp.std():.2f} mmHg")
-
-print("\nVulnerability Scores (Mean +/- SD):")
-print(f"  Mechanical: {mech_vulnerability.mean():.3f} +/- {mech_vulnerability.std():.3f}")
-print(f"  Vascular: {vascular_vulnerability.mean():.3f} +/- {vascular_vulnerability.std():.3f}")
-print(f"  Glymphatic: {glymphatic_vulnerability.mean():.3f} +/- {glymphatic_vulnerability.std():.3f}")
-
-print(f"\nConditions Prevalence:")
-print(f"  Sleep Apnea: {sleep_apnea.mean():.1%}")
-print(f"  Diabetes: {diabetes.mean():.1%}")
-print(f"  Hypertension: {hypertension.mean():.1%}")
-print(f"  Family History: {family_history.mean():.1%}")
-
-print("\n" + "-"*70)
-print("Individual Theory Thresholds (Mean +/- SD):")
-print(f"  Mechanical: {mech_threshold.mean():.2f} +/- {mech_threshold.std():.2f} mmHg")
-print(f"  Vascular: {vascular_threshold_val.mean():.2f} +/- {vascular_threshold_val.std():.2f} mmHg")
-print(f"  Glymphatic: {glymphatic_threshold_val.mean():.2f} +/- {glymphatic_threshold_val.std():.2f} mmHg")
+def integrated_threshold_weakest_link(mech, vasc, glym):
+    return np.minimum(np.minimum(mech, vasc), glym)
 
 # =============================================================================
-# 9. SENSITIVITY ANALYSIS - THE CORE FINDING
+# 6. CORRELATIONS AMONG COMPONENT THRESHOLDS
 # =============================================================================
-print("\n" + "="*70)
+print("\nCorrelations among component thresholds (Spearman, marginal):")
+corr_mv, _ = spearmanr(mech_threshold, vascular_threshold)
+corr_mg, _ = spearmanr(mech_threshold, glymphatic_threshold)
+corr_vg, _ = spearmanr(vascular_threshold, glymphatic_threshold)
+print(f"  Mechanical vs Vascular: rho = {corr_mv:.3f}")
+print(f"  Mechanical vs Glymphatic: rho = {corr_mg:.3f}")
+print(f"  Vascular vs Glymphatic: rho = {corr_vg:.3f}")
+
+# =============================================================================
+# 6b. PARTIAL CORRELATIONS (residual shared-input dependence)
+# =============================================================================
+# Partial correlation of X and Y controlling for a set of covariates Z is
+# computed from the Pearson correlation matrix R of [X, Y, Z...]:
+#     r_XY|Z = -P_XY / sqrt(P_XX * P_YY)
+# where P is the inverse of R and indices refer to X, Y in [0, 1].
+# We compute it on the Pearson scale (the standard definition); the Spearman
+# table above remains the rank-based companion statistic.
+def partial_corr(x, y, controls):
+    """Partial correlation of x and y controlling for the columns in controls."""
+    controls = np.asarray(controls)
+    if controls.ndim == 1:
+        controls = controls.reshape(1, -1)
+    data = np.vstack([x, y, controls]).astype(float)
+    R = np.corrcoef(data)
+    try:
+        P = np.linalg.inv(R)
+    except np.linalg.LinAlgError:
+        return np.nan
+    return -P[0, 1] / np.sqrt(P[0, 0] * P[1, 1])
+
+print("\nPartial correlations (residual shared-input dependence):")
+pc_mech_glym = partial_corr(mech_threshold, glymphatic_threshold,
+                            [age, csfp])
+pc_vasc_glym = partial_corr(vascular_threshold, glymphatic_threshold,
+                            [sleep_apnea])
+pc_mech_vasc = partial_corr(mech_threshold, vascular_threshold, [age])
+
+print(f"  Mech vs Glymph | age, CSFP :  r = {pc_mech_glym:+.3f}")
+print(f"  Vasc vs Glymph | sleep apnea:  r = {pc_vasc_glym:+.3f}")
+print(f"  Mech vs Vasc   | age        :  r = {pc_mech_vasc:+.3f}")
+print("  (Marginal Spearman rho above; partial r below. A large drop from")
+print("   marginal to partial indicates that the shared inputs account for")
+print("   most of the observed dependence among component thresholds.)")
+
+# =============================================================================
+# 7. CLASSIFICATION AND SENSITIVITY ANALYSIS
+# =============================================================================
+print("\n" + "=" * 70)
+print("INTEGRATED GLAUCOMA MODEL: 100,000 VIRTUAL EYES")
+print("=" * 70)
+print(f"NOTE: Component thresholds are clipped to "
+      f"[{THRESHOLD_FLOOR:.0f}, {THRESHOLD_CEILING:.0f}] mmHg as a modelling")
+print("choice. A component threshold at exactly 5.00 mmHg is a floor artefact,")
+print("not a physiological observation.")
+
+def summarize(name, arr):
+    print(f"{name}: {arr.mean():.2f} +/- {arr.std():.2f}  "
+          f"[observed range {arr.min():.2f} - {arr.max():.2f}]")
+
+print("\nPopulation Parameters (Mean +/- SD, observed range):")
+summarize("Age (years)", age)
+summarize("CCT (um)", cct)
+summarize("Corneal Hysteresis (mmHg)", corneal_hysteresis)
+summarize("Scleral Stiffness (a.u.)", scleral_stiffness)
+summarize("LC Pore Diameter (um)", lc_pore_diam)
+summarize("Baseline IOP (mmHg)", baseline_iop)
+summarize("Measured IOP (mmHg)", measured_iop)
+summarize("MAP (mmHg)", map_pressure)
+summarize("CSFP (mmHg)", csfp)
+summarize("OPP (mmHg)", opp)
+
+print("\nVulnerability Scores (Mean +/- SD, observed range):")
+summarize("Mechanical", mech_vulnerability)
+summarize("Vascular", vascular_vulnerability)
+summarize("Glymphatic", glymphatic_vulnerability)
+
+print("\nConditions Prevalence:")
+print(f"  Sleep Apnea: {sleep_apnea.mean()*100:.1f}%")
+print(f"  Diabetes: {diabetes.mean()*100:.1f}%")
+print(f"  Hypertension: {hypertension.mean()*100:.1f}%")
+print(f"  Family History: {family_history.mean()*100:.1f}%")
+print(f"  Nocturnal Hypotension (dip > 20 mmHg): {nocturnal_hypotension.mean()*100:.1f}%")
+
+print("\nIndividual Theory Thresholds (Mean +/- SD, observed range):")
+summarize("Mechanical", mech_threshold)
+summarize("Vascular", vascular_threshold)
+summarize("Glymphatic", glymphatic_threshold)
+
+# =============================================================================
+# 8. SENSITIVITY ANALYSIS: ADDITIVE vs WEAKEST-LINK, FIVE CONFIGURATIONS
+# =============================================================================
+print("\n" + "=" * 70)
 print("SENSITIVITY ANALYSIS: EFFECT OF ARBITRARY WEIGHTS")
-print("="*70)
-
-print("\nAll weight configurations are arbitrary. No single configuration is privileged.")
-print("The value lies in showing the range of results across plausible configurations.")
+print("=" * 70)
+print("All weight configurations are arbitrary. No single configuration is privileged.")
+print("Results are reported for BOTH the additive rule and the weakest-link rule.")
+print("NOTE: The weakest-link rule is weight-invariant by construction; its")
+print("results are identical across all five configurations and are reported")
+print("once as a separate finding, not as a weight-sensitivity result.")
 
 results = []
 
-print("\n" + "-"*90)
-print(f"{'Config':>8} {'Mech':>8} {'Vasc':>8} {'Glymph':>8} {'Mean Threshold':>16} {'Glaucoma':>12} {'NTG':>10}")
-print("-"*90)
-
 for i, w in enumerate(weight_configs):
-    # Calculate integrated threshold with these weights
-    temp_threshold = (w['mechanical'] * mech_threshold +
-                      w['vascular'] * vascular_threshold_val +
-                      w['glymphatic'] * glymphatic_threshold_val)
-    temp_threshold = np.clip(temp_threshold, 8, 40)
-    
-    # Classification
-    temp_class = np.where(measured_iop > temp_threshold, 1, 0)
-    temp_counts = np.bincount(temp_class)
-    temp_glaucoma_pct = temp_counts[1] / n_eyes * 100 if len(temp_counts) > 1 else 0
-    
-    temp_ntg = np.sum((measured_iop <= 21) & (temp_class == 1))
-    temp_ntg_pct = temp_ntg / n_eyes * 100
-    
+    thr_add = integrated_threshold_additive(
+        w, mech_threshold, vascular_threshold, glymphatic_threshold)
+    thr_add = np.clip(thr_add, THRESHOLD_FLOOR, THRESHOLD_CEILING)
+    class_add = (measured_iop > thr_add).astype(int)
+    glaucoma_add = class_add.mean() * 100
+    ntg_add = ((measured_iop <= 21) & (class_add == 1)).mean() * 100
+
     results.append({
-        'config': i+1,
+        'config': i + 1,
         'mech_w': w['mechanical'],
         'vasc_w': w['vascular'],
         'glymph_w': w['glymphatic'],
-        'mean_threshold': temp_threshold.mean(),
-        'threshold_range': (temp_threshold.min(), temp_threshold.max()),
-        'glaucoma_pct': temp_glaucoma_pct,
-        'ntg_pct': temp_ntg_pct
+        'mean_threshold_additive': thr_add.mean(),
+        'glaucoma_pct_additive': glaucoma_add,
+        'ntg_pct_additive': ntg_add,
     })
-    
-    print(f"{i+1:>8} {w['mechanical']:>8.2f} {w['vascular']:>8.2f} {w['glymphatic']:>8.2f} "
-          f"{temp_threshold.mean():>15.2f} {temp_glaucoma_pct:>11.2f}% {temp_ntg_pct:>9.2f}%")
 
-print("-"*90)
+    print(f"\nConfig {i+1} (Mech={w['mechanical']:.2f}, Vasc={w['vascular']:.2f}, "
+          f"Glymph={w['glymphatic']:.2f})")
+    print(f"  Additive: mean threshold = {thr_add.mean():.2f} mmHg, "
+          f"glaucoma = {glaucoma_add:.2f}%, NTG = {ntg_add:.2f}%")
 
-# Calculate ranges
-glaucoma_min = min(r['glaucoma_pct'] for r in results)
-glaucoma_max = max(r['glaucoma_pct'] for r in results)
-ntg_min = min(r['ntg_pct'] for r in results)
-ntg_max = max(r['ntg_pct'] for r in results)
-threshold_min = min(r['mean_threshold'] for r in results)
-threshold_max = max(r['mean_threshold'] for r in results)
+thr_weak = integrated_threshold_weakest_link(
+    mech_threshold, vascular_threshold, glymphatic_threshold)
+thr_weak = np.clip(thr_weak, THRESHOLD_FLOOR, THRESHOLD_CEILING)
+class_weak = (measured_iop > thr_weak).astype(int)
+glaucoma_weak = class_weak.mean() * 100
+ntg_weak = ((measured_iop <= 21) & (class_weak == 1)).mean() * 100
 
-print(f"\nRANGE ACROSS ALL CONFIGURATIONS:")
-print(f"  Mean Threshold: {threshold_min:.2f} - {threshold_max:.2f} mmHg")
-print(f"  Glaucoma Prevalence: {glaucoma_min:.2f}% - {glaucoma_max:.2f}%")
-print(f"  NTG Prevalence: {ntg_min:.2f}% - {ntg_max:.2f}%")
+print(f"\nWeakest-link rule (weight-invariant by construction):")
+print(f"  Mean threshold = {thr_weak.mean():.2f} mmHg, "
+      f"glaucoma = {glaucoma_weak:.2f}%, NTG = {ntg_weak:.2f}%")
 
-print("\n" + "="*70)
-print("KEY INSIGHT")
-print("="*70)
-print("""
-The weights are arbitrary. No single configuration is correct.
-The value of this exercise is demonstrating that RESULTS VARY 
-SUBSTANTIALLY across plausible configurations.
+add_means = [r['mean_threshold_additive'] for r in results]
+add_glau = [r['glaucoma_pct_additive'] for r in results]
+add_ntg = [r['ntg_pct_additive'] for r in results]
 
-This sensitivity to assumptions is the key finding:
-- Mean threshold varies by over 1 mmHg across configurations
-- Glaucoma prevalence varies by nearly 5 percentage points
-- NTG prevalence varies by nearly 5 percentage points
-
-This suggests that any conclusion based on a single weight configuration
-would be fragile. Validation against clinical data is essential.
-
-IMPORTANT: These findings are internal to the model. The model generates
-its own disease labels. Without external validation against clinical
-outcomes, these results should not be interpreted as evidence for or
-against clinical practice.
-""")
+print("\n" + "=" * 70)
+print("RANGE ACROSS ADDITIVE CONFIGURATIONS")
+print("=" * 70)
+print(f"  Mean threshold: {min(add_means):.2f} - {max(add_means):.2f} mmHg "
+      f"(spread = {max(add_means)-min(add_means):.2f} mmHg)")
+print(f"  Glaucoma prevalence: {min(add_glau):.2f}% - {max(add_glau):.2f}%")
+print(f"  NTG prevalence: {min(add_ntg):.2f}% - {max(add_ntg):.2f}%")
+print(f"\nWeakest-link rule (single value, weight-invariant):")
+print(f"  Mean threshold = {thr_weak.mean():.2f} mmHg, "
+      f"glaucoma = {glaucoma_weak:.2f}%, NTG = {ntg_weak:.2f}%")
 
 # =============================================================================
-# 10. FIGURES
+# 9. VARIANCE-BASED GLOBAL SENSITIVITY ANALYSIS (WEIGHTS)
+# =============================================================================
+print("\n" + "=" * 70)
+print("GLOBAL SENSITIVITY ANALYSIS (WEIGHTS)")
+print("=" * 70)
+
+# For Y = w . x with w ~ Dirichlet(alpha) on the 3-simplex, the first-order
+# Sobol index is S1_i = (x_i - x_bar) * Cov(w_i, Y) / Var(Y); for a linear
+# model ST_i = S1_i. Exact, no Monte Carlo error.
+def sobol_dirichlet_analytic(x, alpha=(1.0, 1.0, 1.0)):
+    x = np.asarray(x, dtype=float)
+    a = np.asarray(alpha, dtype=float)
+    a0 = a.sum()
+    Sigma = np.zeros((3, 3))
+    for i in range(3):
+        for j in range(3):
+            if i == j:
+                Sigma[i, j] = a[i] * (a0 - a[i]) / (a0**2 * (a0 + 1.0))
+            else:
+                Sigma[i, j] = -a[i] * a[j] / (a0**2 * (a0 + 1.0))
+    var_Y = x @ Sigma @ x
+    x_bar = x.mean()
+    S1 = np.zeros(3)
+    for i in range(3):
+        cov_wi_Y = Sigma[i, :] @ x
+        S1[i] = (x[i] - x_bar) * cov_wi_Y / var_Y
+    return S1, S1.copy(), var_Y
+
+x_components = np.array([mech_threshold.mean(),
+                         vascular_threshold.mean(),
+                         glymphatic_threshold.mean()])
+S1_w, ST_w, var_w = sobol_dirichlet_analytic(x_components, alpha=(1.0, 1.0, 1.0))
+
+print("Sobol indices w.r.t. weights (analytic, Dirichlet(1,1,1) on simplex):")
+labels = ['Mechanical', 'Vascular', 'Glymphatic']
+for lab, s1, st in zip(labels, S1_w, ST_w):
+    print(f"  {lab:12s}: S1 = {s1:+.4f}   ST = {st:+.4f}")
+print(f"  Sum S1 = {S1_w.sum():.4f}  (should be 1.0)")
+print(f"  Var(Y) = {var_w:.4f}")
+print("  (Exact for the linear model; no MC error. ST = S1 for linear models.)")
+print("\n  A full coefficient-level Sobol decomposition is not reported here.")
+print("  The model's clipping nonlinearity and the shared-input structure make")
+print("  the reduced-form estimator sensitive to the arbitrary coefficient")
+print("  uncertainty band. Partial correlations (reported above) quantify the")
+print("  residual shared-input dependence exactly and are the interpretable")
+print("  analogue of the Sobol interaction share.")
+
+# =============================================================================
+# 10. FACE VALIDITY: COMPARISON TO EPIDEMIOLOGICAL BENCHMARKS
+# =============================================================================
+print("\n" + "=" * 70)
+print("FACE VALIDITY: COMPARISON TO EPIDEMIOLOGICAL BENCHMARKS")
+print("=" * 70)
+print("Published pooled global prevalence in adults 40-80 is ~3.5%.")
+print("The uncalibrated simulated prevalence is far higher, indicating that")
+print("the constants are not calibrated to population epidemiology.")
+
+print("\nOne-parameter grid search toward a 3.5% prevalence target (equal weights):")
+print("(This is an illustrative calibration hook, not full ABC.)")
+target_prev = 0.035
+w_cal = {'mechanical': 1/3, 'vascular': 1/3, 'glymphatic': 1/3}
+
+cal_n = 100_000
+cal_idx = np.random.choice(n_eyes, size=cal_n, replace=False)
+meas_cal = measured_iop[cal_idx]
+age_c = age[cal_idx]; ss_c = scleral_stiffness[cal_idx]
+lc_c = lc_pore_diam[cal_idx]; csfp_c = csfp[cal_idx]
+mv_c = mech_vulnerability[cal_idx]; ch_c = corneal_hysteresis[cal_idx]
+opp_c = opp[cal_idx]; vv_c = vascular_vulnerability[cal_idx]
+gv_c = glymphatic_vulnerability[cal_idx]
+
+def calibrated_prevalence(base_const):
+    m = (base_const + (-0.10)*(age_c-60) + 2.0*(ss_c-1.5)
+         - 6.0*(lc_c-40)/40 + 0.3*(csfp_c-12) - 12.0*mv_c
+         - 0.15*(ch_c-10.5))
+    v = (base_const + (-8.0)*np.clip(1-opp_c/50, 0, 1)
+         + (-4.0)*np.where(age_c>65, 0.3, 0.1) - 10.0*vv_c)
+    g = (base_const + (-0.10)*(age_c-60) + 0.5*(csfp_c-12) - 12.0*gv_c)
+    thr = np.clip(w_cal['mechanical']*m + w_cal['vascular']*v
+                  + w_cal['glymphatic']*g, THRESHOLD_FLOOR, THRESHOLD_CEILING)
+    return (meas_cal > thr).mean()
+
+best_const, best_gap, best_prev = 24.0, np.inf, None
+for base_const in np.arange(18.0, 40.0, 0.5):
+    prev = calibrated_prevalence(base_const)
+    gap = abs(prev - target_prev)
+    if gap < best_gap:
+        best_gap, best_const, best_prev = gap, base_const, prev
+print(f"  Best baseline constant: {best_const:.1f} mmHg")
+print(f"  Calibrated prevalence: {best_prev*100:.2f}% (target {target_prev*100:.1f}%)")
+print("  NOTE: calibration is illustrative; external validation is still required.")
+print(f"  NOTE: calibration raises the baseline constant to ~{best_const:.1f} mmHg,")
+print("  which inverts the uncalibrated '<21 mmHg' narrative. This tension is")
+print("  itself a key face-validity finding and should be discussed in the manuscript.")
+
+# =============================================================================
+# 11. FIGURES
 # =============================================================================
 print("\nGenerating figures...")
 
-# Figure 1: Distribution of individual theory thresholds
 fig1, ax1 = plt.subplots(figsize=(10, 7))
 bins = np.linspace(5, 45, 80)
-ax1.hist(mech_threshold, bins=bins, alpha=0.5, label='Mechanical', color='#2ecc71', density=True, edgecolor='black', linewidth=0.8)
-ax1.hist(vascular_threshold_val, bins=bins, alpha=0.5, label='Vascular', color='#3498db', density=True, edgecolor='black', linewidth=0.8)
-ax1.hist(glymphatic_threshold_val, bins=bins, alpha=0.5, label='Glymphatic', color='#9b59b6', density=True, edgecolor='black', linewidth=0.8)
-
-# Add vertical lines for each configuration's mean threshold
+ax1.hist(mech_threshold, bins=bins, alpha=0.5, label='Mechanical',
+         color='#2ecc71', density=True, edgecolor='black', linewidth=0.8)
+ax1.hist(vascular_threshold, bins=bins, alpha=0.5, label='Vascular',
+         color='#3498db', density=True, edgecolor='black', linewidth=0.8)
+ax1.hist(glymphatic_threshold, bins=bins, alpha=0.5, label='Glymphatic',
+         color='#9b59b6', density=True, edgecolor='black', linewidth=0.8)
 colors = ['#e74c3c', '#e67e22', '#f1c40f', '#2ecc71', '#3498db']
 for i, r in enumerate(results):
-    ax1.axvline(x=r['mean_threshold'], color=colors[i], linestyle='--', alpha=0.5, 
-                linewidth=1.5, label=f'Config {r["config"]}: {r["mean_threshold"]:.1f} mmHg')
-
-ax1.axvline(x=21, color='black', linestyle='-', linewidth=2.5, label='Traditional 21 mmHg (reference)')
+    ax1.axvline(x=r['mean_threshold_additive'], color=colors[i],
+                linestyle='-', alpha=0.5, linewidth=1.5,
+                label=f"Config {r['config']}: {r['mean_threshold_additive']:.2f} mmHg")
+ax1.axvline(x=21, color='black', linestyle='-', linewidth=2.5,
+            label='Traditional 21 mmHg (reference)')
 ax1.set_xlabel('IOP Threshold (mmHg)')
 ax1.set_ylabel('Density')
-ax1.set_title('Distribution of Individual Theory Thresholds\n(Integrated thresholds vary by configuration)')
-ax1.legend(loc='upper right', fontsize=9)
+ax1.set_title('Distribution of Individual Theory Thresholds\n'
+              '(Integrated thresholds vary by configuration)')
+ax1.legend(loc='upper right', fontsize=8)
 ax1.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.savefig('figure1_theory_thresholds.png', dpi=300, bbox_inches='tight', facecolor='white')
 plt.show()
 print("  Saved: figure1_theory_thresholds.png")
 
-# Figure 2: Vulnerability scores distribution
 fig2, ax2 = plt.subplots(figsize=(10, 7))
 bins = np.linspace(0, 1, 40)
-ax2.hist(mech_vulnerability, bins=bins, alpha=0.5, label='Mechanical', color='#2ecc71', density=True, edgecolor='black', linewidth=0.8)
-ax2.hist(vascular_vulnerability, bins=bins, alpha=0.5, label='Vascular', color='#3498db', density=True, edgecolor='black', linewidth=0.8)
-ax2.hist(glymphatic_vulnerability, bins=bins, alpha=0.5, label='Glymphatic', color='#9b59b6', density=True, edgecolor='black', linewidth=0.8)
+ax2.hist(mech_vulnerability, bins=bins, alpha=0.5, label='Mechanical',
+         color='#2ecc71', density=True, edgecolor='black', linewidth=0.8)
+ax2.hist(vascular_vulnerability, bins=bins, alpha=0.5, label='Vascular',
+         color='#3498db', density=True, edgecolor='black', linewidth=0.8)
+ax2.hist(glymphatic_vulnerability, bins=bins, alpha=0.5, label='Glymphatic',
+         color='#9b59b6', density=True, edgecolor='black', linewidth=0.8)
 ax2.set_xlabel('Vulnerability Score (0=Resistant, 1=Susceptible)')
 ax2.set_ylabel('Density')
 ax2.set_title('Distribution of Vulnerability Scores by Theory')
@@ -346,60 +498,59 @@ plt.savefig('figure2_vulnerability_scores.png', dpi=300, bbox_inches='tight', fa
 plt.show()
 print("  Saved: figure2_vulnerability_scores.png")
 
-# Figure 3: Bar chart showing sensitivity to weights
-fig3, ax3 = plt.subplots(figsize=(10, 7))
+fig3, ax3 = plt.subplots(figsize=(12, 7))
 x = np.arange(len(results))
-width = 0.35
-
-glaucoma_vals = [r['glaucoma_pct'] for r in results]
-ntg_vals = [r['ntg_pct'] for r in results]
-
-bars1 = ax3.bar(x - width/2, glaucoma_vals, width, label='Glaucoma (IOP > Threshold)', color='#e74c3c', edgecolor='black', linewidth=1)
-bars2 = ax3.bar(x + width/2, ntg_vals, width, label='NTG (IOP ≤ 21, still disease)', color='#3498db', edgecolor='black', linewidth=1)
-
+width = 0.2
+add_g = [r['glaucoma_pct_additive'] for r in results]
+add_n = [r['ntg_pct_additive'] for r in results]
+b1 = ax3.bar(x - 0.5*width, add_g, width, label='Additive: Glaucoma',
+             color='#e74c3c', edgecolor='black', linewidth=1)
+b2 = ax3.bar(x + 0.5*width, add_n, width, label='Additive: NTG',
+             color='#3498db', edgecolor='black', linewidth=1)
+ax3.axhline(y=glaucoma_weak, color='#f39c12', linestyle='--', linewidth=2,
+            label=f'Weakest-link: Glaucoma ({glaucoma_weak:.1f}%, weight-invariant)')
+ax3.axhline(y=ntg_weak, color='#2ecc71', linestyle=':', linewidth=2,
+            label=f'Weakest-link: NTG ({ntg_weak:.1f}%, weight-invariant)')
 ax3.set_xlabel('Weight Configuration')
 ax3.set_ylabel('Prevalence (%)')
-ax3.set_title('Classification Prevalence Across Arbitrary Weight Configurations\n(Sensitivity to Assumptions)')
+ax3.set_title('Classification Prevalence: Additive Rule Across Configurations\n'
+              'with Weight-Invariant Weakest-Link Reference')
 ax3.set_xticks(x)
-ax3.set_xticklabels([f'Config {r["config"]}' for r in results])
-ax3.legend(loc='upper right')
-
-# Add value labels on bars
-for bar in bars1:
-    height = bar.get_height()
-    ax3.text(bar.get_x() + bar.get_width()/2., height + 0.5,
-             f'{height:.1f}%', ha='center', va='bottom', fontsize=8)
-for bar in bars2:
-    height = bar.get_height()
-    ax3.text(bar.get_x() + bar.get_width()/2., height + 0.5,
-             f'{height:.1f}%', ha='center', va='bottom', fontsize=8)
-
+ax3.set_xticklabels([f"Config {r['config']}" for r in results])
+ax3.legend(loc='upper right', fontsize=8)
+for bars in [b1, b2]:
+    for bar in bars:
+        h = bar.get_height()
+        ax3.text(bar.get_x() + bar.get_width()/2., h + 0.3,
+                 f'{h:.1f}', ha='center', va='bottom', fontsize=7)
 ax3.grid(True, alpha=0.3, axis='y')
 plt.tight_layout()
 plt.savefig('figure3_sensitivity_to_weights.png', dpi=300, bbox_inches='tight', facecolor='white')
 plt.show()
 print("  Saved: figure3_sensitivity_to_weights.png")
 
-# Figure 4: Scatter plot of vulnerability vs threshold
-# Example using Configuration 4 weights (0.40, 0.35, 0.25)
+w4 = weight_configs[3]
 fig4, ax4 = plt.subplots(figsize=(10, 8))
 sample_idx = np.random.choice(n_eyes, size=10000, replace=False)
-
-# Example using Configuration 4 weights (0.40, 0.35, 0.25)
-combined_vulnerability = (0.4 * mech_vulnerability + 
-                          0.35 * vascular_vulnerability + 
-                          0.25 * glymphatic_vulnerability)[sample_idx]
-
-example_threshold = (0.4 * mech_threshold + 
-                     0.35 * vascular_threshold_val + 
-                     0.25 * glymphatic_threshold_val)[sample_idx]
-
+combined_vulnerability = (
+    w4['mechanical'] * mech_vulnerability
+    + w4['vascular'] * vascular_vulnerability
+    + w4['glymphatic'] * glymphatic_vulnerability
+)[sample_idx]
+example_threshold = (
+    w4['mechanical'] * mech_threshold
+    + w4['vascular'] * vascular_threshold
+    + w4['glymphatic'] * glymphatic_threshold
+)[sample_idx]
 scatter = ax4.scatter(combined_vulnerability, example_threshold,
-                     c=age[sample_idx], cmap='viridis', alpha=0.6, s=15, edgecolor='none')
-ax4.axhline(y=21, color='red', linestyle='--', linewidth=2.5, label='Traditional 21 mmHg (reference)')
+                      c=age[sample_idx], cmap='viridis', alpha=0.6, s=15,
+                      edgecolor='none')
+ax4.axhline(y=21, color='red', linestyle='--', linewidth=2.5,
+            label='Traditional 21 mmHg (reference)')
 ax4.set_xlabel('Combined Vulnerability Score (0=Resistant, 1=Susceptible)')
 ax4.set_ylabel('Integrated IOP Threshold (mmHg)')
-ax4.set_title('Vulnerability vs. Integrated Threshold (Color = Age)\n(Example using Configuration 4 weights: 0.40, 0.35, 0.25)')
+ax4.set_title('Vulnerability vs. Integrated Threshold (Color = Age)\n'
+              'Configuration 4 weights: 0.40 (Mech), 0.30 (Vasc), 0.30 (Glymph)')
 cbar = plt.colorbar(scatter, ax=ax4)
 cbar.set_label('Age (years)', rotation=270, labelpad=25)
 ax4.legend(loc='upper right')
@@ -409,92 +560,136 @@ plt.savefig('figure4_vulnerability_vs_threshold.png', dpi=300, bbox_inches='tigh
 plt.show()
 print("  Saved: figure4_vulnerability_vs_threshold.png")
 
-# Figure 5: Box plot showing threshold variation across configurations
 fig5, ax5 = plt.subplots(figsize=(10, 7))
-
-# Sample 10,000 eyes for box plot
 sample_idx = np.random.choice(n_eyes, size=10000, replace=False)
 threshold_data = []
-
 for w in weight_configs:
-    temp_threshold = (w['mechanical'] * mech_threshold[sample_idx] +
-                      w['vascular'] * vascular_threshold_val[sample_idx] +
-                      w['glymphatic'] * glymphatic_threshold_val[sample_idx])
-    temp_threshold = np.clip(temp_threshold, 8, 40)
-    threshold_data.append(temp_threshold)
-
-bp = ax5.boxplot(threshold_data, labels=[f'Config {i+1}' for i in range(len(weight_configs))],
-                 patch_artist=True, showmeans=True,
-                 meanline=True, meanprops={'color': 'red', 'linestyle': '--'})
-
-# Color the boxes
+    temp = (w['mechanical'] * mech_threshold[sample_idx]
+            + w['vascular'] * vascular_threshold[sample_idx]
+            + w['glymphatic'] * glymphatic_threshold[sample_idx])
+    threshold_data.append(np.clip(temp, THRESHOLD_FLOOR, THRESHOLD_CEILING))
+bp = ax5.boxplot(threshold_data,
+                 labels=[f'Config {i+1}' for i in range(len(weight_configs))],
+                 patch_artist=True, showmeans=True, meanline=True,
+                 meanprops={'color': 'red', 'linestyle': '--'})
 colors = ['#e74c3c', '#e67e22', '#f1c40f', '#2ecc71', '#3498db']
 for patch, color in zip(bp['boxes'], colors):
     patch.set_facecolor(color)
     patch.set_alpha(0.6)
-
-ax5.axhline(y=21, color='black', linestyle='-', linewidth=2.5, label='Traditional 21 mmHg (reference)')
+ax5.axhline(y=21, color='black', linestyle='-', linewidth=2.5,
+            label='Traditional 21 mmHg (reference)')
+weak_thr_sample = np.clip(integrated_threshold_weakest_link(
+    mech_threshold[sample_idx], vascular_threshold[sample_idx],
+    glymphatic_threshold[sample_idx]), THRESHOLD_FLOOR, THRESHOLD_CEILING)
+ax5.axhline(y=weak_thr_sample.mean(), color='purple', linestyle=':', linewidth=2,
+            label=f'Weakest-link mean = {weak_thr_sample.mean():.2f} mmHg')
 ax5.set_xlabel('Weight Configuration')
 ax5.set_ylabel('Integrated IOP Threshold (mmHg)')
-ax5.set_title('Distribution of Integrated Thresholds Across Arbitrary Weight Configurations')
-ax5.legend(loc='upper right')
+ax5.set_title('Distribution of Integrated Thresholds Across Arbitrary '
+              'Weight Configurations')
+ax5.legend(loc='upper right', fontsize=9)
 ax5.grid(True, alpha=0.3, axis='y')
 plt.tight_layout()
 plt.savefig('figure5_threshold_variation.png', dpi=300, bbox_inches='tight', facecolor='white')
 plt.show()
 print("  Saved: figure5_threshold_variation.png")
 
-print("\nAll 5 figures saved at 300 DPI!")
+# Figure 6: weight Sobol (analytic) + partial correlations
+fig6, (ax6a, ax6b) = plt.subplots(1, 2, figsize=(14, 6))
+xw = np.arange(3)
+ax6a.bar(xw, S1_w, 0.6, color='#3498db', edgecolor='black')
+ax6a.set_xticks(xw); ax6a.set_xticklabels(labels)
+ax6a.set_ylabel('First-order Sobol index S1')
+ax6a.set_title('Weight Sobol (analytic, Dirichlet(1,1,1))\n'
+               'Exact for linear model; no MC error')
+ax6a.set_ylim(0, max(1.0, S1_w.max()*1.15))
+ax6a.axhline(1.0, color='grey', linestyle=':', linewidth=1)
+ax6a.grid(True, alpha=0.3, axis='y')
+
+pc_labels = ['Mech–Glymph\n| age, CSFP',
+             'Vasc–Glymph\n| sleep apnea',
+             'Mech–Vasc\n| age']
+pc_values = [pc_mech_glym, pc_vasc_glym, pc_mech_vasc]
+pc_colors = ['#2ecc71', '#9b59b6', '#e74c3c']
+ax6b.bar(np.arange(len(pc_values)), pc_values, 0.6,
+         color=pc_colors, edgecolor='black')
+ax6b.set_xticks(np.arange(len(pc_values)))
+ax6b.set_xticklabels(pc_labels, fontsize=9)
+ax6b.set_ylabel('Partial correlation r')
+ax6b.set_title('Partial Correlations (shared-input dependence removed)\n'
+               'Exact; no estimator, no arbitrary uncertainty band')
+ax6b.axhline(0, color='grey', linewidth=0.8)
+ax6b.grid(True, alpha=0.3, axis='y')
+
+plt.tight_layout()
+plt.savefig('figure6_sobol_and_partial_correlations.png', dpi=300, bbox_inches='tight', facecolor='white')
+plt.show()
+print("  Saved: figure6_sobol_and_partial_correlations.png")
+
+print("\nAll figures saved at 300 DPI!")
 
 # =============================================================================
-# 11. CONCLUSION - REVISED WITH CAREFUL WORDING
+# 12. CONCLUSION
 # =============================================================================
-print("\n" + "="*70)
+print("\n" + "=" * 70)
 print("CONCLUSION")
-print("="*70)
-
+print("=" * 70)
 print(f"""
-This integrated Monte Carlo simulation demonstrates the following:
+1. INDIVIDUAL THRESHOLDS (UNDER MODEL ASSUMPTIONS; CLIPPED TO [5, 40] mmHg)
+   - Mechanical: {mech_threshold.mean():.2f} +/- {mech_threshold.std():.2f} mmHg
+   - Vascular:   {vascular_threshold.mean():.2f} +/- {vascular_threshold.std():.2f} mmHg
+   - Glymphatic: {glymphatic_threshold.mean():.2f} +/- {glymphatic_threshold.std():.2f} mmHg
 
-1. INDIVIDUAL THRESHOLDS VARY WIDELY (UNDER MODEL ASSUMPTIONS)
-   - Mechanical threshold: {mech_threshold.mean():.2f} +/- {mech_threshold.std():.2f} mmHg
-   - Vascular threshold: {vascular_threshold_val.mean():.2f} +/- {vascular_threshold_val.std():.2f} mmHg
-   - Glymphatic threshold: {glymphatic_threshold_val.mean():.2f} +/- {glymphatic_threshold_val.std():.2f} mmHg
+2. ADDITIVE RULE: WEIGHTS ARE ARBITRARY; RESULTS ARE SENSITIVE
+   - Mean integrated threshold: {min(add_means):.2f} - {max(add_means):.2f} mmHg
+     (spread = {max(add_means)-min(add_means):.2f} mmHg)
+   - Glaucoma prevalence: {min(add_glau):.2f}% - {max(add_glau):.2f}%
+   - NTG prevalence: {min(add_ntg):.2f}% - {max(add_ntg):.2f}%
+   (The manuscript must quote this computed spread of
+    {max(add_means)-min(add_means):.2f} mmHg, not a hard-coded "over 1 mmHg".)
 
-2. THE WEIGHTS ARE ARBITRARY - RESULTS ARE SENSITIVE
-   - No single configuration is correct
-   - Mean integrated threshold varies from {threshold_min:.2f} to {threshold_max:.2f} mmHg across configurations
-   - Glaucoma prevalence varies from {glaucoma_min:.2f}% to {glaucoma_max:.2f}%
-   - NTG prevalence varies from {ntg_min:.2f}% to {ntg_max:.2f}%
+3. WEAKEST-LINK RULE: WEIGHT-INVARIANT BY CONSTRUCTION
+   - Mean threshold = {thr_weak.mean():.2f} mmHg
+   - Glaucoma = {glaucoma_weak:.2f}%, NTG = {ntg_weak:.2f}%
+   - Identical across all five weight configurations; reported as a
+     separate finding, not as a weight-sensitivity result.
 
-3. THIS SENSITIVITY IS THE KEY FINDING
-   - Results depend heavily on arbitrary assumptions
-   - Any single result would be fragile
-   - Validation against clinical data is essential
+4. GLOBAL SENSITIVITY
+   Weight Sobol (analytic, full simplex): S1 = {S1_w.round(3).tolist()},
+     sum = {S1_w.sum():.3f} (valid indices in [0,1]).
+   Coefficient-level Sobol is not reported; the clipping nonlinearity and
+   shared-input structure make the reduced-form estimator sensitive to the
+   arbitrary coefficient uncertainty band. Partial correlations (below) are
+   the exact, interpretable substitute.
 
-4. THE MODEL DIFFERS FROM THE TRADITIONAL 21 mmHg CUT-OFF
-   - Under model assumptions, mean thresholds range from {threshold_min:.2f} to {threshold_max:.2f} mmHg
-   - This differs from the traditional 21 mmHg clinical threshold
-   - However, these findings are internal to the model and should NOT be 
-     interpreted as evidence against the clinical threshold
+5. PARTIAL CORRELATIONS (shared-input dependence removed)
+   - Mech vs Glymph | age, CSFP :  r = {pc_mech_glym:+.3f}
+   - Vasc vs Glymph | sleep apnea:  r = {pc_vasc_glym:+.3f}
+   - Mech vs Vasc   | age        :  r = {pc_mech_vasc:+.3f}
+   Compare with the marginal Spearman rho:
+   - Mech vs Glymph: rho = {corr_mg:.3f}
+   - Vasc vs Glymph: rho = {corr_vg:.3f}
+   - Mech vs Vasc:   rho = {corr_mv:.3f}
+   A large drop from marginal to partial indicates that the shared inputs
+   account for most of the observed dependence among component thresholds.
 
-5. INTEGRATED MODELING IS FEASIBLE
-   - This proof-of-concept demonstrates the approach
-   - Future work should focus on validation and calibration
+6. FACE VALIDITY
+   - Uncalibrated prevalence far exceeds the ~3.5% pooled global estimate.
+   - A one-parameter grid search to 3.5% required a baseline constant of
+     {best_const:.1f} mmHg (vs 24.0 uncalibrated), which inverts the
+     uncalibrated "<21 mmHg" narrative. This tension is itself a key
+     finding and must be discussed in the manuscript.
 
-KEY INSIGHT:
-  The weights are arbitrary. The value of this exercise is demonstrating 
-  that results vary substantially across plausible configurations. 
-  This sensitivity to assumptions is the key finding, not any single number.
+KEY INSIGHT: The weights and coefficients are arbitrary. The value of this
+exercise is demonstrating that results vary across plausible configurations,
+and that calibration to epidemiological targets is essential.
 
-IMPORTANT CAVEAT:
-  All findings are internal to the model. The model generates its own
-  disease labels. Without external validation against clinical outcomes,
-  these results should not be interpreted as evidence for or against
-  clinical practice. The 21 mmHg threshold has clinical utility that
-  this model does not address.
+IMPORTANT CAVEAT: All findings are internal to the model. The model generates
+its own disease labels. Without external validation against clinical outcomes,
+these results should not be interpreted as evidence for or against clinical
+practice. The 21 mmHg threshold has clinical utility that this model does not
+address.
 """)
-
-print("="*70)
+print("=" * 70)
 print("SIMULATION COMPLETE")
-print("="*70)
+print("=" * 70)
